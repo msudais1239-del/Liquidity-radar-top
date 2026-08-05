@@ -110,7 +110,6 @@ function analyzeKlines(klines) {
   for (const k of klines) {
     const high = parseFloat(k[2]);
     const low = parseFloat(k[3]);
-    const vol = parseFloat(k[5]);
     if (!priceStep) priceStep = Math.max((high - low) / 4, high * 0.0005) || high * 0.0005;
   }
   for (const k of klines) {
