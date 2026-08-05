@@ -273,7 +273,7 @@ function useRadarData(symbol, interval) {
   }, [interval]);
 
   useEffect(() => {
-    const id = setInterval(fetchCore, 4000);
+    const id = setInterval(fetchCore, 1000);
     return () => clearInterval(id);
   }, [fetchCore]);
 
