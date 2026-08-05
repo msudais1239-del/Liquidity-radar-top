@@ -3,19 +3,83 @@ import { ComposedChart, Bar, XAxis, YAxis, ResponsiveContainer, Tooltip, Cartesi
 
 const BASE = "https://fapi.binance.com/fapi/v1";
 
+// ---------- top ~50 Binance USDT-M futures symbols ----------
 const SYMBOLS = [
   { symbol: "BTCUSDT", label: "BTC" },
   { symbol: "ETHUSDT", label: "ETH" },
-  { symbol: "SOLUSDT", label: "SOL" },
   { symbol: "BNBUSDT", label: "BNB" },
+  { symbol: "SOLUSDT", label: "SOL" },
   { symbol: "XRPUSDT", label: "XRP" },
   { symbol: "DOGEUSDT", label: "DOGE" },
   { symbol: "XAUUSDT", label: "XAU" },
+  { symbol: "ADAUSDT", label: "ADA" },
+  { symbol: "TRXUSDT", label: "TRX" },
+  { symbol: "LINKUSDT", label: "LINK" },
+  { symbol: "AVAXUSDT", label: "AVAX" },
+  { symbol: "DOTUSDT", label: "DOT" },
+  { symbol: "LTCUSDT", label: "LTC" },
+  { symbol: "BCHUSDT", label: "BCH" },
+  { symbol: "ATOMUSDT", label: "ATOM" },
+  { symbol: "UNIUSDT", label: "UNI" },
+  { symbol: "NEARUSDT", label: "NEAR" },
+  { symbol: "APTUSDT", label: "APT" },
+  { symbol: "ARBUSDT", label: "ARB" },
+  { symbol: "OPUSDT", label: "OP" },
+  { symbol: "FILUSDT", label: "FIL" },
+  { symbol: "ICPUSDT", label: "ICP" },
+  { symbol: "ETCUSDT", label: "ETC" },
+  { symbol: "INJUSDT", label: "INJ" },
+  { symbol: "SUIUSDT", label: "SUI" },
+  { symbol: "RENDERUSDT", label: "RENDER" },
+  { symbol: "TIAUSDT", label: "TIA" },
+  { symbol: "SEIUSDT", label: "SEI" },
+  { symbol: "SANDUSDT", label: "SAND" },
+  { symbol: "AAVEUSDT", label: "AAVE" },
+  { symbol: "MKRUSDT", label: "MKR" },
+  { symbol: "RUNEUSDT", label: "RUNE" },
+  { symbol: "GALAUSDT", label: "GALA" },
+  { symbol: "ALGOUSDT", label: "ALGO" },
+  { symbol: "VETUSDT", label: "VET" },
+  { symbol: "HBARUSDT", label: "HBAR" },
+  { symbol: "XLMUSDT", label: "XLM" },
+  { symbol: "EGLDUSDT", label: "EGLD" },
+  { symbol: "THETAUSDT", label: "THETA" },
+  { symbol: "FLOWUSDT", label: "FLOW" },
+  { symbol: "XTZUSDT", label: "XTZ" },
+  { symbol: "ZECUSDT", label: "ZEC" },
+  { symbol: "COMPUSDT", label: "COMP" },
+  { symbol: "SNXUSDT", label: "SNX" },
+  { symbol: "CRVUSDT", label: "CRV" },
+  { symbol: "GRTUSDT", label: "GRT" },
+  { symbol: "DYDXUSDT", label: "DYDX" },
+  { symbol: "LDOUSDT", label: "LDO" },
+  { symbol: "PEPEUSDT", label: "PEPE" },
+  { symbol: "WIFUSDT", label: "WIF" },
 ];
+
+const SYMBOL_LIST = SYMBOLS.map((s) => s.symbol);
 
 const INTERVALS = ["1m", "5m", "15m", "1h"];
 
+// polling cadence — core data (price/depth/signal inputs) refreshes every 2.5s,
+// chart candles every 15s. Slower than 1s on purpose: it kills the tick-to-tick
+// noise that was making the signal box flicker.
+const CORE_POLL_MS = 2500;
+const CHART_POLL_MS = 15000;
+const SCANNER_POLL_MS = 2500;
+const SCANNER_BATCH_SIZE = 3;
+
 // ---------- formatters ----------
+function smartDigits(price) {
+  if (price === null || price === undefined || isNaN(price)) return 2;
+  const p = Math.abs(price);
+  if (p === 0) return 2;
+  if (p < 0.001) return 8;
+  if (p < 0.01) return 6;
+  if (p < 1) return 4;
+  if (p < 100) return 2;
+  return 0;
+}
 function fmtUSD(n, digits = 0) {
   if (n === null || n === undefined || isNaN(n)) return "—";
   return "$" + Number(n).toLocaleString(undefined, { maximumFractionDigits: digits, minimumFractionDigits: digits });
@@ -33,10 +97,6 @@ function fmtPct(n, digits = 2) {
   if (n === null || n === undefined || isNaN(n)) return "—";
   const sign = n > 0 ? "+" : "";
   return sign + n.toFixed(digits) + "%";
-}
-function fmtQty(n) {
-  if (n === null || n === undefined || isNaN(n)) return "—";
-  return Number(n).toLocaleString(undefined, { maximumFractionDigits: 3 });
 }
 function timeAgo(ts) {
   const s = Math.max(0, Math.round((Date.now() - ts) / 1000));
@@ -89,11 +149,17 @@ function analyzeDepth(bids, asks, midPrice) {
 }
 
 // ---------- kline-derived CVD / bias / volume profile ----------
+// Bias/profile are computed from CLOSED candles only — the still-forming last
+// candle changes every tick and was the single biggest source of signal jitter.
+// The breakout-sweep check still looks at the live candle since that's meant
+// to react immediately.
 function analyzeKlines(klines) {
-  if (!klines || klines.length === 0) return null;
+  if (!klines || klines.length < 2) return null;
+  const closed = klines.slice(0, -1);
+
   let buyVol = 0,
     sellVol = 0;
-  const bars = klines.map((k) => {
+  const bars = closed.map((k) => {
     const vol = parseFloat(k[5]);
     const takerBuy = parseFloat(k[9]);
     const takerSell = vol - takerBuy;
@@ -106,13 +172,12 @@ function analyzeKlines(klines) {
 
   const profile = {};
   let priceStep = null;
-  for (const k of klines) {
+  for (const k of closed) {
     const high = parseFloat(k[2]);
     const low = parseFloat(k[3]);
-    const vol = parseFloat(k[5]);
     if (!priceStep) priceStep = Math.max((high - low) / 4, high * 0.0005) || high * 0.0005;
   }
-  for (const k of klines) {
+  for (const k of closed) {
     const high = parseFloat(k[2]);
     const low = parseFloat(k[3]);
     const vol = parseFloat(k[5]);
@@ -147,14 +212,18 @@ function analyzeKlines(klines) {
   return { buyPct, sellPct: 100 - buyPct, bars, poc, profileList: profileList.slice(0, 12), sweep };
 }
 
-// ---------- SIGNAL GENERATION ----------
-function generateSignal(kAnalysis, depthAnalysis, price, target, fundingRate, spoofScore, marketStrength) {
-  if (!kAnalysis || !price || !target) return null;
-  
+// ---------- SIGNAL SCORING (pure, no thresholding) ----------
+// Returns raw buy/sell scores that sum to 100. `target` (order-book target
+// level) is optional — when it's not available (e.g. the lightweight
+// top-50 screener, which skips full depth to stay cheap on API calls) its
+// weight is simply redistributed across the other factors.
+function computeRawScores(kAnalysis, target, price, fundingRate, marketStrength) {
+  if (!kAnalysis || !price) return null;
+
   let buyScore = 0;
   let sellScore = 0;
-  
-  // 1. Market Bias (0-30 points)
+
+  // 1. Market bias from taker buy/sell volume (0-30 pts)
   if (kAnalysis.buyPct >= 60) {
     buyScore += 30;
   } else if (kAnalysis.buyPct <= 40) {
@@ -163,27 +232,26 @@ function generateSignal(kAnalysis, depthAnalysis, price, target, fundingRate, sp
     buyScore += (kAnalysis.buyPct - 40) * 1.5;
     sellScore += (60 - kAnalysis.buyPct) * 1.5;
   }
-  
-  // 2. Target Position (0-25 points)
-  const targetDist = Math.abs(target.price - price) / price;
-  if (target.price > price) {
-    // Target is above = bullish
-    buyScore += target.score * 0.25;
-  } else {
-    // Target is below = bearish
-    sellScore += target.score * 0.25;
+
+  // 2. Order-book target level (0-25 pts) — only when depth data is present
+  if (target) {
+    if (target.price > price) {
+      buyScore += target.score * 0.25;
+    } else {
+      sellScore += target.score * 0.25;
+    }
   }
-  
-  // 3. Funding Rate (0-20 points)
-  if (fundingRate !== null) {
+
+  // 3. Funding rate (0-20 pts)
+  if (fundingRate !== null && fundingRate !== undefined) {
     if (fundingRate > 0.01) {
       sellScore += Math.min(20, fundingRate * 1000);
     } else if (fundingRate < -0.01) {
       buyScore += Math.min(20, Math.abs(fundingRate) * 1000);
     }
   }
-  
-  // 4. Volume Profile POC (0-15 points)
+
+  // 4. Volume profile POC (0-15 pts)
   if (kAnalysis.poc) {
     const pocDist = Math.abs(kAnalysis.poc.price - price) / price;
     if (pocDist < 0.01 && kAnalysis.poc.price < price) {
@@ -192,26 +260,57 @@ function generateSignal(kAnalysis, depthAnalysis, price, target, fundingRate, sp
       sellScore += 15;
     }
   }
-  
-  // 5. Market Strength (0-10 points)
-  if (marketStrength >= 70) {
-    buyScore += 10;
-  } else if (marketStrength <= 30) {
-    sellScore += 10;
+
+  // 5. Market strength (0-10 pts)
+  if (marketStrength !== null && marketStrength !== undefined) {
+    if (marketStrength >= 70) buyScore += 10;
+    else if (marketStrength <= 30) sellScore += 10;
   }
-  
-  // Normalize scores to 0-100
+
   const total = buyScore + sellScore || 1;
-  buyScore = Math.round((buyScore / total) * 100);
-  sellScore = Math.round((sellScore / total) * 100);
-  
-  if (buyScore > 65) {
-    return { type: "BUY", score: buyScore, strength: buyScore > 80 ? "STRONG" : buyScore > 70 ? "MODERATE" : "WEAK" };
-  } else if (sellScore > 65) {
-    return { type: "SELL", score: sellScore, strength: sellScore > 80 ? "STRONG" : sellScore > 70 ? "MODERATE" : "WEAK" };
+  return { buyScore: (buyScore / total) * 100, sellScore: (sellScore / total) * 100 };
+}
+
+// EMA smoothing — call with a plain object ref + key so callers (main view,
+// screener) can each keep their own independent history.
+function emaUpdate(store, key, raw, alpha = 0.3) {
+  if (raw === null || raw === undefined || isNaN(raw)) return store[key];
+  store[key] = store[key] === undefined ? raw : store[key] * (1 - alpha) + raw * alpha;
+  return store[key];
+}
+
+// Hysteresis so the signal box doesn't pop in/out or flip direction on a
+// single noisy reading. Must clear the `enter` bar to switch on, and must
+// drop below `exit` before it's allowed to switch off or flip.
+function updateSignalState(state, buyScore, enter = 68, exit = 55) {
+  if (buyScore === null || buyScore === undefined || isNaN(buyScore)) {
+    return state.active ? { type: state.type, score: Math.round(state.lastScore) } : null;
   }
-  
-  return null;
+  const sellScore = 100 - buyScore;
+  if (!state.active) {
+    if (buyScore >= enter) {
+      state.active = true;
+      state.type = "BUY";
+    } else if (sellScore >= enter) {
+      state.active = true;
+      state.type = "SELL";
+    }
+  } else {
+    const current = state.type === "BUY" ? buyScore : sellScore;
+    const opposite = state.type === "BUY" ? sellScore : buyScore;
+    if (current < exit) {
+      if (opposite >= enter) {
+        state.type = state.type === "BUY" ? "SELL" : "BUY";
+      } else {
+        state.active = false;
+        state.type = null;
+      }
+    }
+  }
+  if (!state.active) return null;
+  state.lastScore = state.type === "BUY" ? buyScore : sellScore;
+  const score = Math.round(state.lastScore);
+  return { type: state.type, score, strength: score > 85 ? "STRONG" : score > 72 ? "MODERATE" : "WEAK" };
 }
 
 // ---------- order-flow / spoofing tracking across polls ----------
@@ -250,7 +349,7 @@ function depthToMap(levels) {
   return m;
 }
 
-// ---------- data hook ----------
+// ---------- data hook (selected symbol, full detail) ----------
 function useRadarData(symbol, interval) {
   const [ticker, setTicker] = useState(null);
   const [premium, setPremium] = useState(null);
@@ -340,12 +439,12 @@ function useRadarData(symbol, interval) {
   }, [interval]);
 
   useEffect(() => {
-    const id = setInterval(fetchCore, 1000);
+    const id = setInterval(fetchCore, CORE_POLL_MS);
     return () => clearInterval(id);
   }, [fetchCore]);
 
   useEffect(() => {
-    const id = setInterval(fetchChart, 15000);
+    const id = setInterval(fetchChart, CHART_POLL_MS);
     return () => clearInterval(id);
   }, [fetchChart]);
 
@@ -358,6 +457,82 @@ function useRadarData(symbol, interval) {
   }, [openInterest]);
 
   return { ticker, premium, openInterest, depth, klines, chartKlines, events, error, loading, lastUpdate, oiChangePct };
+}
+
+// ---------- top-50 screener hook ----------
+// Cycles through the whole symbol list a few at a time (lightweight calls
+// only — ticker + funding + 1m klines, no full depth) so it stays cheap on
+// API weight, and surfaces only the names whose smoothed, hysteresis-gated
+// confidence is 95 or higher.
+function useTopSignalScanner(symbols) {
+  const [signals, setSignals] = useState([]);
+  const stateRef = useRef({});
+  const cursorRef = useRef(0);
+
+  const scanBatch = useCallback(async () => {
+    const batch = [];
+    for (let i = 0; i < SCANNER_BATCH_SIZE; i++) {
+      batch.push(symbols[cursorRef.current % symbols.length]);
+      cursorRef.current += 1;
+    }
+
+    await Promise.all(
+      batch.map(async (sym) => {
+        try {
+          const [tRes, pRes, kRes] = await Promise.all([
+            fetch(`${BASE}/ticker/24hr?symbol=${sym}`),
+            fetch(`${BASE}/premiumIndex?symbol=${sym}`),
+            fetch(`${BASE}/klines?symbol=${sym}&interval=1m&limit=30`),
+          ]);
+          if (!tRes.ok || !pRes.ok || !kRes.ok) return;
+          const [t, p, k] = await Promise.all([tRes.json(), pRes.json(), kRes.json()]);
+
+          const price = parseFloat(t.lastPrice);
+          const changePct = parseFloat(t.priceChangePercent);
+          const fundingRate = parseFloat(p.lastFundingRate) * 100;
+          const kA = analyzeKlines(k);
+          if (!kA || !price || isNaN(price)) return;
+
+          if (!stateRef.current[sym]) {
+            stateRef.current[sym] = { smooth: {}, hysteresis: { active: false, type: null } };
+          }
+          const st = stateRef.current[sym];
+
+          const smoothedBuyPct = emaUpdate(st.smooth, "buyPct", kA.buyPct, 0.35);
+          const marketStrength = Math.min(100, Math.max(0, smoothedBuyPct + fundingRate * 150));
+          const raw = computeRawScores({ ...kA, buyPct: smoothedBuyPct }, null, price, fundingRate, marketStrength);
+          const smoothedBuyScore = emaUpdate(st.smooth, "buyScore", raw ? raw.buyScore : null, 0.4);
+          const sig = updateSignalState(st.hysteresis, smoothedBuyScore, 70, 55);
+
+          st.price = price;
+          st.changePct = changePct;
+          st.updatedAt = Date.now();
+          st.signal = sig;
+        } catch (e) {
+          // symbol may not exist on futures, or a transient network hiccup — skip it
+        }
+      })
+    );
+
+    const list = [];
+    for (const sym of symbols) {
+      const st = stateRef.current[sym];
+      if (st && st.signal && st.signal.score >= 95) {
+        list.push({ symbol: sym, type: st.signal.type, score: st.signal.score, price: st.price, changePct: st.changePct, updatedAt: st.updatedAt });
+      }
+    }
+    list.sort((a, b) => b.score - a.score);
+    setSignals(list);
+  }, [symbols]);
+
+  useEffect(() => {
+    scanBatch();
+    const id = setInterval(scanBatch, SCANNER_POLL_MS);
+    return () => clearInterval(id);
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, []);
+
+  return signals;
 }
 
 // ---------- Custom Chart Components ----------
@@ -376,21 +551,21 @@ const CandleBodyShape = (props) => {
 const CustomTooltip = ({ active, payload, label }) => {
   if (active && payload && payload.length) {
     const data = payload[0].payload;
+    const d = smartDigits(data.close);
     return (
       <div style={{ background: "#0f172a", border: "1px solid #1e293b", borderRadius: 12, padding: "10px 14px", fontSize: 12, color: "#cbd5e1", boxShadow: "0 10px 25px rgba(0,0,0,0.5)" }}>
         <div style={{ marginBottom: 6, color: "#94a3b8", fontWeight: 600 }}>{new Date(label).toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' })}</div>
         <div style={{ display: 'grid', gridTemplateColumns: '1fr 1fr', gap: 8 }}>
-          <div>O: <span style={{ color: "#fff", fontWeight: 700 }}>{fmtUSD(data.open, 2)}</span></div>
-          <div>H: <span style={{ color: "#fff", fontWeight: 700 }}>{fmtUSD(data.high, 2)}</span></div>
-          <div>L: <span style={{ color: "#fff", fontWeight: 700 }}>{fmtUSD(data.low, 2)}</span></div>
-          <div>C: <span style={{ color: data.isUp ? "#22c55e" : "#ef4444", fontWeight: 700 }}>{fmtUSD(data.close, 2)}</span></div>
+          <div>O: <span style={{ color: "#fff", fontWeight: 700 }}>{fmtUSD(data.open, d)}</span></div>
+          <div>H: <span style={{ color: "#fff", fontWeight: 700 }}>{fmtUSD(data.high, d)}</span></div>
+          <div>L: <span style={{ color: "#fff", fontWeight: 700 }}>{fmtUSD(data.low, d)}</span></div>
+          <div>C: <span style={{ color: data.isUp ? "#22c55e" : "#ef4444", fontWeight: 700 }}>{fmtUSD(data.close, d)}</span></div>
         </div>
       </div>
     );
   }
   return null;
 };
-
 
 // ---------- small UI atoms ----------
 function Card({ children, style }) {
@@ -435,13 +610,12 @@ function Gauge({ value, label, sub }) {
 // ---------- SIGNAL COMPONENT ----------
 function SignalDisplay({ signal }) {
   if (!signal) return null;
-  
+
   const isBuy = signal.type === "BUY";
   const bgColor = isBuy ? "#0a2e1a" : "#2e0a0a";
   const borderColor = isBuy ? "#22c55e" : "#ef4444";
   const textColor = isBuy ? "#22c55e" : "#ef4444";
-  const pulseColor = isBuy ? "rgba(34, 197, 94, 0.3)" : "rgba(239, 68, 68, 0.3)";
-  
+
   return (
     <div style={{
       ...styles.signalBox,
@@ -461,7 +635,7 @@ function SignalDisplay({ signal }) {
         }
         .signal-arrow { animation: bounce 1s infinite; }
       `}</style>
-      
+
       <div style={{ display: "flex", alignItems: "center", gap: 16, marginBottom: 12 }}>
         <div style={{ fontSize: 60, fontWeight: 900, color: textColor, lineHeight: 1 }}>
           <span className="signal-arrow">{isBuy ? "↑" : "↓"}</span>
@@ -475,7 +649,7 @@ function SignalDisplay({ signal }) {
           </div>
         </div>
       </div>
-      
+
       <div style={{ display: "flex", alignItems: "center", gap: 12, marginBottom: 8 }}>
         <div style={{ fontSize: 48, fontWeight: 800, color: textColor }}>
           {signal.score}
@@ -496,11 +670,54 @@ function SignalDisplay({ signal }) {
   );
 }
 
+// ---------- HIGH-CONFIDENCE SCREENER (95%+) ----------
+function ScreenerRow({ entry }) {
+  const isBuy = entry.type === "BUY";
+  const color = isBuy ? "#22c55e" : "#ef4444";
+  const label = SYMBOLS.find((s) => s.symbol === entry.symbol)?.label || entry.symbol.replace("USDT", "");
+  return (
+    <div style={styles.screenerRow}>
+      <div style={{ display: "flex", alignItems: "center", gap: 10 }}>
+        <span style={{ ...styles.screenerBadge, background: isBuy ? "rgba(34,197,94,0.15)" : "rgba(239,68,68,0.15)", color }}>
+          {isBuy ? "↑ BUY" : "↓ SELL"}
+        </span>
+        <span style={{ fontWeight: 800, fontSize: 15, color: "#f8fafc" }}>{label}</span>
+      </div>
+      <div style={{ textAlign: "right" }}>
+        <div style={{ fontWeight: 800, fontSize: 15, color }}>{entry.score}</div>
+        <div style={{ fontSize: 11, color: "#64748b" }}>{fmtUSD(entry.price, smartDigits(entry.price))} · {timeAgo(entry.updatedAt)}</div>
+      </div>
+    </div>
+  );
+}
+
+function TopSignalsCard({ signals }) {
+  return (
+    <Card>
+      <CardLabel right={<span style={{ fontSize: 11, color: "#64748b" }}>SCANNING {SYMBOLS.length} COINS</span>}>
+        HIGH CONFIDENCE (95+)
+      </CardLabel>
+      {signals.length === 0 ? (
+        <div style={{ fontSize: 13, color: "#64748b", padding: "8px 0", lineHeight: 1.6 }}>
+          No coin is showing 95%+ confidence right now. This box only lists signals that clear a very high bar, so it may sit empty for a while — that's expected.
+        </div>
+      ) : (
+        <div>
+          {signals.slice(0, 10).map((entry) => (
+            <ScreenerRow key={entry.symbol} entry={entry} />
+          ))}
+        </div>
+      )}
+    </Card>
+  );
+}
+
 export default function LiquidityRadar() {
   const [symbol, setSymbol] = useState("BTCUSDT");
   const [interval, setIntervalStr] = useState("5m");
   const data = useRadarData(symbol, interval);
   const { ticker, premium, openInterest, depth, klines, chartKlines, events, error, loading, lastUpdate, oiChangePct } = data;
+  const topSignals = useTopSignalScanner(SYMBOL_LIST);
 
   useEffect(() => {
     document.body.style.backgroundColor = "#02040a";
@@ -525,15 +742,23 @@ export default function LiquidityRadar() {
   const { magnet, target, zones } = depthAnalysis;
   const kAnalysis = useMemo(() => analyzeKlines(klines), [klines]);
 
-  const biasLabel = kAnalysis ? (kAnalysis.buyPct >= 50 ? "BULLISH" : "BEARISH") : null;
-  const confidence = kAnalysis && target ? Math.round(Math.min(99, Math.max(1, Math.abs(kAnalysis.buyPct - 50) * 1.4 + (target.score || 0) * 0.3))) : null;
+  // --- smoothing (resets whenever the selected symbol changes) ---
+  const smootherRef = useRef({ key: symbol, vals: {} });
+  if (smootherRef.current.key !== symbol) smootherRef.current = { key: symbol, vals: {} };
+  const smoothedBuyPct = kAnalysis ? emaUpdate(smootherRef.current.vals, "buyPct", kAnalysis.buyPct, 0.3) : smootherRef.current.vals.buyPct;
+  const smoothedTargetScore = target ? emaUpdate(smootherRef.current.vals, "targetScore", target.score, 0.3) : smootherRef.current.vals.targetScore;
 
-  const marketStrength = kAnalysis && fundingRate !== null ? Math.round(Math.min(100, Math.max(0, kAnalysis.buyPct + fundingRate * 150))) : null;
+  const biasLabel = smoothedBuyPct != null ? (smoothedBuyPct >= 50 ? "BULLISH" : "BEARISH") : null;
+  const confidence = smoothedBuyPct != null && smoothedTargetScore != null
+    ? Math.round(Math.min(99, Math.max(1, Math.abs(smoothedBuyPct - 50) * 1.4 + smoothedTargetScore * 0.3)))
+    : null;
+
+  const marketStrength = smoothedBuyPct != null && fundingRate !== null ? Math.round(Math.min(100, Math.max(0, smoothedBuyPct + fundingRate * 150))) : null;
   const strengthLabel = marketStrength >= 65 ? "STRONG" : marketStrength >= 40 ? "MODERATE" : "WEAK";
   const strengthSub = marketStrength >= 65 ? "Trend has conviction." : marketStrength >= 40 ? "Mixed signals — monitor closely." : "Fading momentum.";
 
-  const shortSqueeze = fundingRate !== null ? Math.round(Math.min(100, Math.max(0, -fundingRate * 400 + (kAnalysis ? kAnalysis.buyPct - 50 : 0) * 1.5))) : 0;
-  const longSqueeze = fundingRate !== null ? Math.round(Math.min(100, Math.max(0, fundingRate * 400 + (kAnalysis ? 50 - kAnalysis.buyPct : 0) * 1.5))) : 0;
+  const shortSqueeze = fundingRate !== null ? Math.round(Math.min(100, Math.max(0, -fundingRate * 400 + (smoothedBuyPct != null ? smoothedBuyPct - 50 : 0) * 1.5))) : 0;
+  const longSqueeze = fundingRate !== null ? Math.round(Math.min(100, Math.max(0, fundingRate * 400 + (smoothedBuyPct != null ? 50 - smoothedBuyPct : 0) * 1.5))) : 0;
   const bullTrap = kAnalysis && kAnalysis.sweep && kAnalysis.sweep.type === "bearish" ? kAnalysis.sweep.confidence : 0;
   const bearTrap = kAnalysis && kAnalysis.sweep && kAnalysis.sweep.type === "bullish" ? kAnalysis.sweep.confidence : 0;
 
@@ -543,11 +768,20 @@ export default function LiquidityRadar() {
   const spoofScore = recentEvents.length ? Math.round(Math.min(100, (cancels.length / Math.max(1, appears.length + cancels.length)) * 130)) : 0;
   const biggestCancel = cancels.sort((a, b) => b.usd - a.usd)[0];
 
-  // GENERATE SIGNAL
-  const signal = useMemo(() => {
-    if (!kAnalysis || !target || price === null) return null;
-    return generateSignal(kAnalysis, depthAnalysis, price, target, fundingRate, spoofScore, marketStrength);
-  }, [kAnalysis, target, price, depthAnalysis, fundingRate, spoofScore, marketStrength]);
+  // --- signal: raw scores -> smoothing -> hysteresis, so it holds steady between polls ---
+  const rawScores = useMemo(() => {
+    if (!kAnalysis || !price) return null;
+    const kA = { ...kAnalysis, buyPct: smoothedBuyPct ?? kAnalysis.buyPct };
+    const t = target ? { ...target, score: smoothedTargetScore ?? target.score } : null;
+    return computeRawScores(kA, t, price, fundingRate, marketStrength);
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [kAnalysis, price, target, fundingRate, marketStrength, smoothedBuyPct, smoothedTargetScore]);
+
+  const smoothedBuyScore = rawScores ? emaUpdate(smootherRef.current.vals, "buyScore", rawScores.buyScore, 0.35) : smootherRef.current.vals.buyScore;
+
+  const hysteresisRef = useRef({ key: symbol, state: { active: false, type: null } });
+  if (hysteresisRef.current.key !== symbol) hysteresisRef.current = { key: symbol, state: { active: false, type: null } };
+  const signal = updateSignalState(hysteresisRef.current.state, smoothedBuyScore, 68, 55);
 
   const chartData = useMemo(() => {
     if (!chartKlines) return [];
@@ -564,6 +798,8 @@ export default function LiquidityRadar() {
       };
     });
   }, [chartKlines]);
+
+  const priceDigits = smartDigits(price);
 
   return (
     <div style={styles.pageWrapper}>
@@ -589,7 +825,7 @@ export default function LiquidityRadar() {
             <span style={styles.liveDot} /> LIVE
           </div>
         </div>
-        
+
         <div style={styles.hr} />
 
         <div style={styles.tabRow}>
@@ -616,14 +852,14 @@ export default function LiquidityRadar() {
         <div style={styles.statsRow}>
           <Stat label="OI" value={oiUsd ? fmtCompact(oiUsd) : "—"} />
           <Stat label="FR" value={fundingRate !== null ? fmtPct(fundingRate, 4) : "—"} color={fundingRate >= 0 ? "#22c55e" : "#ef4444"} />
-          <Stat label="Spread" value={spread !== null ? fmtUSD(spread, spread < 1 ? 2 : 1) : "—"} />
+          <Stat label="Spread" value={spread !== null ? fmtUSD(spread, smartDigits(spread)) : "—"} />
           <Stat label="Trades" value={tradeCount ? tradeCount.toLocaleString() : "—"} color="#38bdf8" />
         </div>
 
         <Card style={styles.priceCard}>
           <div style={{ display: "flex", justifyContent: "space-between", alignItems: "flex-start" }}>
             <div>
-              <div style={styles.priceText}>{price ? fmtUSD(price, price < 100 ? 4 : 0) : "Loading…"}</div>
+              <div style={styles.priceText}>{price ? fmtUSD(price, priceDigits) : "Loading…"}</div>
               <div style={styles.priceChangeWrapper}>
                 <span style={{ color: changePct >= 0 ? "#22c55e" : "#ef4444", fontWeight: 700 }}>
                   {changePct !== null ? fmtPct(changePct) : ""}
@@ -636,8 +872,8 @@ export default function LiquidityRadar() {
             </div>
           </div>
           <div style={styles.priceSubRow}>
-            <span>24h H: <b style={{ color: "#fff" }}>{high ? fmtUSD(high) : "—"}</b></span>
-            <span>24h L: <b style={{ color: "#fff" }}>{low ? fmtUSD(low) : "—"}</b></span>
+            <span>24h H: <b style={{ color: "#fff" }}>{high ? fmtUSD(high, smartDigits(high)) : "—"}</b></span>
+            <span>24h L: <b style={{ color: "#fff" }}>{low ? fmtUSD(low, smartDigits(low)) : "—"}</b></span>
             <span>Vol: <b style={{ color: "#fff" }}>{vol ? fmtCompact(vol) : "—"}</b></span>
           </div>
         </Card>
@@ -679,28 +915,28 @@ export default function LiquidityRadar() {
           <CardLabel>MARKET BIAS</CardLabel>
           <div style={{ display: "flex", justifyContent: "space-between", alignItems: "baseline", marginTop: -4 }}>
             <div style={{ color: biasLabel === "BULLISH" ? "#22c55e" : "#ec4899", fontWeight: 800, fontSize: 22 }}>{biasLabel ?? "—"}</div>
-            <div style={{ color: "#94a3b8", fontWeight: 600 }}>{kAnalysis ? `${kAnalysis.buyPct.toFixed(1)}/100` : "—"}</div>
+            <div style={{ color: "#94a3b8", fontWeight: 600 }}>{smoothedBuyPct != null ? `${smoothedBuyPct.toFixed(1)}/100` : "—"}</div>
           </div>
-          <BarGauge pct={kAnalysis ? kAnalysis.buyPct : 0} color={biasLabel === "BULLISH" ? "#22c55e" : "#ec4899"} />
+          <BarGauge pct={smoothedBuyPct ?? 0} color={biasLabel === "BULLISH" ? "#22c55e" : "#ec4899"} />
           <div style={{ display: "flex", justifyContent: "space-between", marginTop: 8, fontSize: 13 }}>
-            <span style={{ color: "#22c55e", fontWeight: 700 }}>{kAnalysis ? kAnalysis.buyPct.toFixed(1) : "—"}% BUY</span>
-            <span style={{ color: "#ec4899", fontWeight: 700 }}>{kAnalysis ? kAnalysis.sellPct.toFixed(1) : "—"}% SELL</span>
+            <span style={{ color: "#22c55e", fontWeight: 700 }}>{smoothedBuyPct != null ? smoothedBuyPct.toFixed(1) : "—"}% BUY</span>
+            <span style={{ color: "#ec4899", fontWeight: 700 }}>{smoothedBuyPct != null ? (100 - smoothedBuyPct).toFixed(1) : "—"}% SELL</span>
           </div>
         </Card>
 
         <div style={styles.twoCol}>
           <Card style={{ padding: "16px 14px" }}>
             <CardLabel>MAGNET</CardLabel>
-            <div style={{ color: "#38bdf8", fontSize: 24, fontWeight: 800, marginTop: 4 }}>{magnet ? fmtUSD(magnet.price, magnet.price < 100 ? 3 : 0) : "—"}</div>
+            <div style={{ color: "#38bdf8", fontSize: 24, fontWeight: 800, marginTop: 4 }}>{magnet ? fmtUSD(magnet.price, smartDigits(magnet.price)) : "—"}</div>
             <div style={styles.cardHint}>Largest resting cluster</div>
             <Row label="Dist" value={magnet && price ? `${(Math.abs(magnet.price - price) / price * 100).toFixed(2)}%` : "—"} valueColor="#22c55e" />
             <Row label="Size" value={magnet ? fmtCompact(magnet.usd) : "—"} />
           </Card>
           <Card style={{ padding: "16px 14px" }}>
             <CardLabel>TARGET</CardLabel>
-            <div style={{ color: "#f5b301", fontSize: 24, fontWeight: 800, marginTop: 4 }}>{target ? fmtUSD(target.price, target.price < 100 ? 3 : 0) : "—"}</div>
+            <div style={{ color: "#f5b301", fontSize: 24, fontWeight: 800, marginTop: 4 }}>{target ? fmtUSD(target.price, smartDigits(target.price)) : "—"}</div>
             <div style={styles.cardHint}>OB density + CVD</div>
-            <Row label="Score" value={target ? `${target.score}/100` : "—"} valueColor="#f5b301" />
+            <Row label="Score" value={smoothedTargetScore != null ? `${Math.round(smoothedTargetScore)}/100` : "—"} valueColor="#f5b301" />
             <Row label="Type" value={target && price ? (target.price > price ? "Resistance" : "Support") : "—"} valueColor="#f5b301" />
           </Card>
         </div>
@@ -726,7 +962,7 @@ export default function LiquidityRadar() {
             <div style={{ color: "#ec4899", fontSize: 32, fontWeight: 800 }}>{spoofScore}/100</div>
             <div style={{ fontSize: 13, color: "#94a3b8", lineHeight: 1.4 }}>
               {biggestCancel
-                ? `${fmtCompact(biggestCancel.usd)} ${biggestCancel.side === "BUY" ? "bid" : "ask"} wall at ${fmtUSD(biggestCancel.price, biggestCancel.price < 100 ? 3 : 0)} pulled`
+                ? `${fmtCompact(biggestCancel.usd)} ${biggestCancel.side === "BUY" ? "bid" : "ask"} wall at ${fmtUSD(biggestCancel.price, smartDigits(biggestCancel.price))} pulled`
                 : "No large walls pulled recently."}
             </div>
           </div>
@@ -744,7 +980,7 @@ export default function LiquidityRadar() {
                 return (
                   <div key={i} style={styles.heatRow}>
                     <span style={{ width: 80, fontSize: 13, color: price && Math.abs(z.price - price) < (depthAnalysis.bucketSize || 1) ? "#38bdf8" : "#94a3b8", fontWeight: 600 }}>
-                      {fmtUSD(z.price, z.price < 100 ? 3 : 0)}
+                      {fmtUSD(z.price, smartDigits(z.price))}
                     </span>
                     <div style={{ ...styles.heatBar, width: `${(z.usd / maxUsd) * 100}%`, background: isWall ? "#f5b301" : z.side === "ask" ? "rgba(236,72,153,0.3)" : "rgba(34,197,94,0.3)" }}>
                       {isWall && <span style={{ fontSize: 11, color: "#02040a", fontWeight: 800, padding: "0 8px" }}>{fmtCompact(z.usd)} WALL</span>}
@@ -754,6 +990,9 @@ export default function LiquidityRadar() {
               })}
           </div>
         </Card>
+
+        {/* HIGH CONFIDENCE SCREENER — 95%+ ONLY, across all 50 tracked coins */}
+        <TopSignalsCard signals={topSignals} />
 
         <div style={styles.footer}>
           <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'center', gap: 6, marginBottom: 8 }}>
@@ -843,5 +1082,7 @@ const styles = {
     marginBottom: 20,
     background: "#0a0e17",
   },
+  screenerRow: { display: "flex", justifyContent: "space-between", alignItems: "center", padding: "10px 0", borderBottom: "1px solid #1e293b" },
+  screenerBadge: { fontSize: 11, fontWeight: 800, padding: "4px 8px", borderRadius: 8, letterSpacing: 0.5 },
   footer: { textAlign: "center", fontSize: 12, color: "#475569", marginTop: 32 },
 };
