@@ -110,6 +110,7 @@ function analyzeKlines(klines) {
   for (const k of klines) {
     const high = parseFloat(k[2]);
     const low = parseFloat(k[3]);
+    const vol = parseFloat(k[5]);
     if (!priceStep) priceStep = Math.max((high - low) / 4, high * 0.0005) || high * 0.0005;
   }
   for (const k of klines) {
@@ -382,7 +383,7 @@ export default function LiquidityRadar() {
   const shortSqueeze = fundingRate !== null ? Math.round(Math.min(100, Math.max(0, -fundingRate * 400 + (kAnalysis ? kAnalysis.buyPct - 50 : 0) * 1.5))) : 0;
   const longSqueeze = fundingRate !== null ? Math.round(Math.min(100, Math.max(0, fundingRate * 400 + (kAnalysis ? 50 - kAnalysis.buyPct : 0) * 1.5))) : 0;
   const bullTrap = kAnalysis && kAnalysis.sweep && kAnalysis.sweep.type === "bearish" ? kAnalysis.sweep.confidence : 0;
-  const bearTrap = kAnalysis && kAnalysis.sweep && kAnalysis.sweep.type === "bullish" ? 0 : 0;
+  const bearTrap = kAnalysis && kAnalysis.sweep && kAnalysis.sweep.type === "bullish" ? kAnalysis.sweep.confidence : 0;
 
   // spoofing score from recent CANCEL/APPEAR events
   const recentEvents = events.filter((e) => Date.now() - e.time < 120000);
