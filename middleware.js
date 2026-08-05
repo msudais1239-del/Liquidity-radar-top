@@ -1,13 +1,15 @@
 export default function middleware(request) {
-  const authCookie = request.headers.get('cookie')?.includes(`site-auth=${process.env.SITE_PASSWORD}`)
+  const url = new URL(request.url)
 
-  if (authCookie) {
-    return new Response(null, { status: 200 })
+  if (url.pathname === '/login.html' || url.pathname === '/api/auth') {
+    return
   }
 
-  const url = new URL(request.url)
-  if (url.pathname === '/api/auth' || url.pathname === '/login.html') {
-    return new Response(null, { status: 200 })
+  const cookie = request.headers.get('cookie') || ''
+  const isAuthed = cookie.includes(`site-auth=${process.env.SITE_PASSWORD}`)
+
+  if (isAuthed) {
+    return
   }
 
   return Response.redirect(new URL('/login.html', request.url))
