@@ -147,6 +147,73 @@ function analyzeKlines(klines) {
   return { buyPct, sellPct: 100 - buyPct, bars, poc, profileList: profileList.slice(0, 12), sweep };
 }
 
+// ---------- SIGNAL GENERATION ----------
+function generateSignal(kAnalysis, depthAnalysis, price, target, fundingRate, spoofScore, marketStrength) {
+  if (!kAnalysis || !price || !target) return null;
+  
+  let buyScore = 0;
+  let sellScore = 0;
+  
+  // 1. Market Bias (0-30 points)
+  if (kAnalysis.buyPct >= 60) {
+    buyScore += 30;
+  } else if (kAnalysis.buyPct <= 40) {
+    sellScore += 30;
+  } else {
+    buyScore += (kAnalysis.buyPct - 40) * 1.5;
+    sellScore += (60 - kAnalysis.buyPct) * 1.5;
+  }
+  
+  // 2. Target Position (0-25 points)
+  const targetDist = Math.abs(target.price - price) / price;
+  if (target.price > price) {
+    // Target is above = bullish
+    buyScore += target.score * 0.25;
+  } else {
+    // Target is below = bearish
+    sellScore += target.score * 0.25;
+  }
+  
+  // 3. Funding Rate (0-20 points)
+  if (fundingRate !== null) {
+    if (fundingRate > 0.01) {
+      sellScore += Math.min(20, fundingRate * 1000);
+    } else if (fundingRate < -0.01) {
+      buyScore += Math.min(20, Math.abs(fundingRate) * 1000);
+    }
+  }
+  
+  // 4. Volume Profile POC (0-15 points)
+  if (kAnalysis.poc) {
+    const pocDist = Math.abs(kAnalysis.poc.price - price) / price;
+    if (pocDist < 0.01 && kAnalysis.poc.price < price) {
+      buyScore += 15;
+    } else if (pocDist < 0.01 && kAnalysis.poc.price > price) {
+      sellScore += 15;
+    }
+  }
+  
+  // 5. Market Strength (0-10 points)
+  if (marketStrength >= 70) {
+    buyScore += 10;
+  } else if (marketStrength <= 30) {
+    sellScore += 10;
+  }
+  
+  // Normalize scores to 0-100
+  const total = buyScore + sellScore || 1;
+  buyScore = Math.round((buyScore / total) * 100);
+  sellScore = Math.round((sellScore / total) * 100);
+  
+  if (buyScore > 65) {
+    return { type: "BUY", score: buyScore, strength: buyScore > 80 ? "STRONG" : buyScore > 70 ? "MODERATE" : "WEAK" };
+  } else if (sellScore > 65) {
+    return { type: "SELL", score: sellScore, strength: sellScore > 80 ? "STRONG" : sellScore > 70 ? "MODERATE" : "WEAK" };
+  }
+  
+  return null;
+}
+
 // ---------- order-flow / spoofing tracking across polls ----------
 function diffDepth(prevMap, currMap, threshold, midPrice) {
   const events = [];
@@ -365,6 +432,70 @@ function Gauge({ value, label, sub }) {
   );
 }
 
+// ---------- SIGNAL COMPONENT ----------
+function SignalDisplay({ signal }) {
+  if (!signal) return null;
+  
+  const isBuy = signal.type === "BUY";
+  const bgColor = isBuy ? "#0a2e1a" : "#2e0a0a";
+  const borderColor = isBuy ? "#22c55e" : "#ef4444";
+  const textColor = isBuy ? "#22c55e" : "#ef4444";
+  const pulseColor = isBuy ? "rgba(34, 197, 94, 0.3)" : "rgba(239, 68, 68, 0.3)";
+  
+  return (
+    <div style={{
+      ...styles.signalBox,
+      background: bgColor,
+      borderColor: borderColor,
+      boxShadow: `0 0 40px ${isBuy ? 'rgba(34, 197, 94, 0.4)' : 'rgba(239, 68, 68, 0.4)'}`,
+      animation: 'pulse 2s infinite'
+    }}>
+      <style>{`
+        @keyframes pulse {
+          0%, 100% { box-shadow: 0 0 40px ${isBuy ? 'rgba(34, 197, 94, 0.4)' : 'rgba(239, 68, 68, 0.4)'}; }
+          50% { box-shadow: 0 0 60px ${isBuy ? 'rgba(34, 197, 94, 0.8)' : 'rgba(239, 68, 68, 0.8)'}; }
+        }
+        @keyframes bounce {
+          0%, 100% { transform: scale(1); }
+          50% { transform: scale(1.05); }
+        }
+        .signal-arrow { animation: bounce 1s infinite; }
+      `}</style>
+      
+      <div style={{ display: "flex", alignItems: "center", gap: 16, marginBottom: 12 }}>
+        <div style={{ fontSize: 60, fontWeight: 900, color: textColor, lineHeight: 1 }}>
+          <span className="signal-arrow">{isBuy ? "↑" : "↓"}</span>
+        </div>
+        <div>
+          <div style={{ fontSize: 44, fontWeight: 900, color: textColor, lineHeight: 1 }}>
+            {signal.type}
+          </div>
+          <div style={{ fontSize: 14, color: textColor, fontWeight: 700, letterSpacing: 1, marginTop: 4 }}>
+            {signal.strength} SIGNAL
+          </div>
+        </div>
+      </div>
+      
+      <div style={{ display: "flex", alignItems: "center", gap: 12, marginBottom: 8 }}>
+        <div style={{ fontSize: 48, fontWeight: 800, color: textColor }}>
+          {signal.score}
+        </div>
+        <div style={{ flex: 1 }}>
+          <div style={{ height: 8, background: "#1e293b", borderRadius: 999, overflow: "hidden" }}>
+            <div style={{
+              height: "100%",
+              width: `${signal.score}%`,
+              background: textColor,
+              borderRadius: 999
+            }} />
+          </div>
+          <div style={{ fontSize: 11, color: textColor, marginTop: 4, fontWeight: 600 }}>Confidence Score</div>
+        </div>
+      </div>
+    </div>
+  );
+}
+
 export default function LiquidityRadar() {
   const [symbol, setSymbol] = useState("BTCUSDT");
   const [interval, setIntervalStr] = useState("5m");
@@ -372,7 +503,6 @@ export default function LiquidityRadar() {
   const { ticker, premium, openInterest, depth, klines, chartKlines, events, error, loading, lastUpdate, oiChangePct } = data;
 
   useEffect(() => {
-    // Fix white sides by forcing body color globally
     document.body.style.backgroundColor = "#02040a";
     document.body.style.margin = "0";
     document.body.style.padding = "0";
@@ -412,7 +542,12 @@ export default function LiquidityRadar() {
   const appears = recentEvents.filter((e) => e.type === "APPEAR");
   const spoofScore = recentEvents.length ? Math.round(Math.min(100, (cancels.length / Math.max(1, appears.length + cancels.length)) * 130)) : 0;
   const biggestCancel = cancels.sort((a, b) => b.usd - a.usd)[0];
-  const nextSweepPct = target ? Math.min(99, Math.round(target.score * 0.9 + Math.random() * 3)) : null;
+
+  // GENERATE SIGNAL
+  const signal = useMemo(() => {
+    if (!kAnalysis || !target || price === null) return null;
+    return generateSignal(kAnalysis, depthAnalysis, price, target, fundingRate, spoofScore, marketStrength);
+  }, [kAnalysis, target, price, depthAnalysis, fundingRate, spoofScore, marketStrength]);
 
   const chartData = useMemo(() => {
     if (!chartKlines) return [];
@@ -470,6 +605,13 @@ export default function LiquidityRadar() {
         </div>
 
         {error && <div style={styles.errorBox}>Connection error: {error}. Retrying…</div>}
+
+        {/* BIG SIGNAL DISPLAY */}
+        {signal && (
+          <div style={{ marginBottom: 20 }}>
+            <SignalDisplay signal={signal} />
+          </div>
+        )}
 
         <div style={styles.statsRow}>
           <Stat label="OI" value={oiUsd ? fmtCompact(oiUsd) : "—"} />
@@ -571,24 +713,6 @@ export default function LiquidityRadar() {
         </Card>
 
         <Card>
-          <CardLabel>LAST LIQUIDITY SWEEP</CardLabel>
-          {kAnalysis && kAnalysis.sweep ? (
-            <>
-              <div style={{ ...styles.sweepBadge, color: kAnalysis.sweep.type === "bullish" ? "#22c55e" : "#ec4899", background: kAnalysis.sweep.type === "bullish" ? "rgba(34,197,94,0.1)" : "rgba(236,72,153,0.1)" }}>
-                {kAnalysis.sweep.label}
-              </div>
-              <div style={styles.cardHint}>Price swept {fmtUSD(kAnalysis.sweep.price)}, reclaimed range.</div>
-              <div style={{ display: "flex", gap: 24, marginTop: 14 }}>
-                <MiniStat label="At Price" value={fmtUSD(kAnalysis.sweep.price)} />
-                <MiniStat label="Confidence" value={`${kAnalysis.sweep.confidence}/100`} color="#f5b301" />
-              </div>
-            </>
-          ) : (
-            <div style={{...styles.cardHint, marginTop: 0}}>No recent sweep detected in the last 12 candles.</div>
-          )}
-        </Card>
-
-        <Card>
           <CardLabel>TRAP &amp; SQUEEZE RISK</CardLabel>
           <TrapRow label="Bull Trap" value={bullTrap} />
           <TrapRow label="Bear Trap" value={bearTrap} />
@@ -606,12 +730,6 @@ export default function LiquidityRadar() {
                 : "No large walls pulled recently."}
             </div>
           </div>
-          <div style={styles.spoofBars}>
-            {recentEvents.slice(0, 20).map((e, i) => (
-              <div key={e.id || i} style={{ ...styles.spoofBar, background: e.type === "CANCEL" ? "#ec4899" : e.type === "APPEAR" ? "#f5b301" : "#1e293b" }} />
-            ))}
-          </div>
-          <div style={styles.warnText}>⚠ Probability estimate only. Never confirmed — do not trade on this alone.</div>
         </Card>
 
         <Card>
@@ -637,50 +755,13 @@ export default function LiquidityRadar() {
           </div>
         </Card>
 
-        <Card>
-          <CardLabel right={<span style={{ fontSize: 11, color: "#64748b" }}>★ = Point of Control</span>}>VOLUME PROFILE — SESSION</CardLabel>
-          {kAnalysis && kAnalysis.poc && (
-            <div style={{ marginTop: 8 }}>
-              {kAnalysis.profileList.slice(0, 6).map((p, i) => {
-                const maxVol = kAnalysis.profileList[0].vol;
-                return (
-                  <div key={i} style={styles.heatRow}>
-                    <span style={{ width: 90, fontSize: 13, fontWeight: p.price === kAnalysis.poc.price ? 700 : 600, color: p.price === kAnalysis.poc.price ? "#f5b301" : "#94a3b8" }}>
-                      {p.price === kAnalysis.poc.price ? "★ " : ""}
-                      {fmtUSD(p.price, p.price < 100 ? 3 : 0)}
-                    </span>
-                    <div style={{ ...styles.heatBar, width: `${(p.vol / maxVol) * 100}%`, background: "rgba(245,179,1,0.25)" }} />
-                    <span style={{ fontSize: 12, color: "#cbd5e1", marginLeft: 8 }}>{fmtQty(p.vol)}</span>
-                  </div>
-                );
-              })}
-            </div>
-          )}
-        </Card>
-
-        <Card>
-          <CardLabel right={<span style={{ fontSize: 11, color: "#64748b" }}>{events.length} tracking</span>}>LARGE ORDER EVENTS</CardLabel>
-          <div style={{ marginTop: 6, maxHeight: 280, overflowY: "auto", paddingRight: 4 }}>
-            {events.length === 0 && <div style={styles.cardHint}>Watching the book for large orders…</div>}
-            {events.slice(0, 20).map((e) => (
-              <div key={e.id} style={styles.eventRow}>
-                <span style={{ width: 66, fontSize: 12, color: "#64748b", fontWeight: 600 }}>{e.type}</span>
-                <span style={{ width: 44, fontSize: 12, color: e.side === "BUY" ? "#22c55e" : "#ec4899", fontWeight: 800 }}>{e.side}</span>
-                <span style={{ flex: 1, fontSize: 14, color: "#f8fafc", fontWeight: 600 }}>{fmtUSD(e.price, e.price < 100 ? 3 : 0)}</span>
-                <span style={{ fontSize: 13, color: "#cbd5e1", fontWeight: 500 }}>{fmtCompact(e.usd)}</span>
-                <span style={{ width: 56, fontSize: 11, color: "#64748b", textAlign: "right" }}>{timeAgo(e.time)}</span>
-              </div>
-            ))}
-          </div>
-        </Card>
-
         <div style={styles.footer}>
           <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'center', gap: 6, marginBottom: 8 }}>
              <span style={{width: 8, height: 8, borderRadius: '50%', background: loading ? '#f5b301' : '#22c55e'}} />
              {loading ? "Connecting to Binance..." : lastUpdate ? `Live Data — Updated ${lastUpdate.toLocaleTimeString()}` : ""}
           </div>
           <div style={{ opacity: 0.5, lineHeight: 1.5 }}>
-            Spoofing, trap/squeeze, and sweep scores are heuristic models built from public order-book &amp; kline data — not internal exchange events. Not financial advice.
+            Signals generated from market bias, liquidity, and order flow analysis — not financial advice.
           </div>
         </div>
       </div>
@@ -696,14 +777,7 @@ function Stat({ label, value, color }) {
     </div>
   );
 }
-function MiniStat({ label, value, color }) {
-  return (
-    <div style={{ textAlign: "center", flex: 1 }}>
-      <div style={{ fontWeight: 800, color: color || "#f8fafc", fontSize: 16 }}>{value}</div>
-      <div style={{ fontSize: 11, color: "#64748b", marginTop: 4, fontWeight: 600 }}>{label}</div>
-    </div>
-  );
-}
+
 function Row({ label, value, valueColor }) {
   return (
     <div style={{ display: "flex", justifyContent: "space-between", marginTop: 10, fontSize: 14 }}>
@@ -712,6 +786,7 @@ function Row({ label, value, valueColor }) {
     </div>
   );
 }
+
 function TrapRow({ label, value, color }) {
   return (
     <div style={{ display: "flex", alignItems: "center", gap: 12, marginTop: 14 }}>
@@ -756,14 +831,17 @@ const styles = {
   barFill: { height: "100%", borderRadius: 999, transition: "width 0.5s cubic-bezier(0.4, 0, 0.2, 1)" },
   twoCol: { display: "grid", gridTemplateColumns: "1fr 1fr", gap: 14, marginBottom: 20 },
   cardHint: { fontSize: 13, color: "#64748b", marginTop: 6, lineHeight: 1.5, fontWeight: 500 },
-  sweepBadge: { display: "inline-block", borderRadius: 999, padding: "6px 14px", fontSize: 12, fontWeight: 800, marginTop: 4 },
-  spoofBars: { display: "flex", gap: 4, alignItems: "flex-end", height: 36, marginTop: 16 },
-  spoofBar: { flex: 1, height: 36, borderRadius: 3 },
-  warnText: { fontSize: 11, color: "#64748b", fontStyle: "italic", marginTop: 14 },
   heatRow: { display: "flex", alignItems: "center", gap: 10, marginBottom: 8 },
   heatBar: { height: 26, borderRadius: 6, display: "flex", alignItems: "center", minWidth: 6, transition: "width 0.3s ease" },
   eventRow: { display: "flex", alignItems: "center", gap: 8, padding: "10px 0", borderBottom: "1px solid #1e293b" },
   ivPill: { fontSize: 11, color: "#64748b", padding: "4px 10px", borderRadius: 8, border: "1px solid #1e293b", fontWeight: 600, cursor: 'pointer', transition: 'all 0.2s' },
   ivPillActive: { color: "#02040a", background: "#f5b301", borderColor: "#f5b301", fontWeight: 800 },
+  signalBox: {
+    border: "2px solid",
+    borderRadius: 24,
+    padding: "24px",
+    marginBottom: 20,
+    background: "#0a0e17",
+  },
   footer: { textAlign: "center", fontSize: 12, color: "#475569", marginTop: 32 },
 };
