@@ -218,7 +218,7 @@ function analyzeKlines(klines) {
 // top-50 screener, which skips full depth to stay cheap on API calls) its
 // weight is simply redistributed across the other factors.
 function computeRawScores(kAnalysis, target, price, fundingRate, marketStrength) {
-  if (!kAnalysis || !price) return null;
+  if (!kAnalysis || price === null || price === undefined || isNaN(price)) return null;
 
   let buyScore = 0;
   let sellScore = 0;
@@ -284,7 +284,9 @@ function emaUpdate(store, key, raw, alpha = 0.3) {
 // drop below `exit` before it's allowed to switch off or flip.
 function updateSignalState(state, buyScore, enter = 68, exit = 55) {
   if (buyScore === null || buyScore === undefined || isNaN(buyScore)) {
-    return state.active ? { type: state.type, score: Math.round(state.lastScore) } : null;
+    if (!state.active) return null;
+    const score = Math.round(state.lastScore);
+    return { type: state.type, score, strength: score > 85 ? "STRONG" : score > 72 ? "MODERATE" : "WEAK" };
   }
   const sellScore = 100 - buyScore;
   if (!state.active) {
