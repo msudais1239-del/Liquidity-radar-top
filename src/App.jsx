@@ -143,7 +143,7 @@ function analyzeDepth(bids, asks, midPrice) {
     .slice()
     .sort((a, b) => b.score - a.score)
     .slice(0, 6)
-    .sort((a, b) => a.price - b.price);
+    .sort((a, b) => b.price - a.price);
 
   return { magnet, target, zones, bucketSize };
 }
@@ -171,21 +171,11 @@ function analyzeKlines(klines) {
   const buyPct = (buyVol / total) * 100;
 
   const profile = {};
-  // priceStep sizes the volume-profile buckets. Compute it from the average
-  // high-low range across the whole closed window (not just the first candle)
-  // so the bucket size reflects the window's actual volatility.
   let priceStep = null;
-  let rangeSum = 0;
-  let lastHigh = null;
   for (const k of closed) {
     const high = parseFloat(k[2]);
     const low = parseFloat(k[3]);
-    rangeSum += high - low;
-    lastHigh = high;
-  }
-  if (closed.length > 0) {
-    const avgRange = rangeSum / closed.length;
-    priceStep = Math.max(avgRange / 4, lastHigh * 0.0005) || lastHigh * 0.0005;
+    if (!priceStep) priceStep = Math.max((high - low) / 4, high * 0.0005) || high * 0.0005;
   }
   for (const k of closed) {
     const high = parseFloat(k[2]);
@@ -210,12 +200,12 @@ function analyzeKlines(klines) {
     const priorLow = Math.min(...priorSlice.map((k) => parseFloat(k[3])));
     const priorHigh = Math.max(...priorSlice.map((k) => parseFloat(k[2])));
     const lastLow = parseFloat(last[3]);
-    const lastHigh2 = parseFloat(last[2]);
+    const lastHigh = parseFloat(last[2]);
     const lastClose = parseFloat(last[4]);
     if (lastLow < priorLow && lastClose > priorLow) {
       sweep = { type: "bullish", price: priorLow, label: "Weak Bullish Sweep", confidence: Math.round(Math.min(95, ((lastClose - lastLow) / (priorHigh - priorLow || 1)) * 200)) };
-    } else if (lastHigh2 > priorHigh && lastClose < priorHigh) {
-      sweep = { type: "bearish", price: priorHigh, label: "Weak Bearish Sweep", confidence: Math.round(Math.min(95, ((lastHigh2 - lastClose) / (priorHigh - priorLow || 1)) * 200)) };
+    } else if (lastHigh > priorHigh && lastClose < priorHigh) {
+      sweep = { type: "bearish", price: priorHigh, label: "Weak Bearish Sweep", confidence: Math.round(Math.min(95, ((lastHigh - lastClose) / (priorHigh - priorLow || 1)) * 200)) };
     }
   }
 
@@ -766,8 +756,8 @@ export default function LiquidityRadar() {
     : null;
 
   const marketStrength = smoothedBuyPct != null && fundingRate !== null ? Math.round(Math.min(100, Math.max(0, smoothedBuyPct + fundingRate * 150))) : null;
-  const strengthLabel = marketStrength == null ? "—" : marketStrength >= 65 ? "STRONG" : marketStrength >= 40 ? "MODERATE" : "WEAK";
-  const strengthSub = marketStrength == null ? "Waiting for data…" : marketStrength >= 65 ? "Trend has conviction." : marketStrength >= 40 ? "Mixed signals — monitor closely." : "Fading momentum.";
+  const strengthLabel = marketStrength >= 65 ? "STRONG" : marketStrength >= 40 ? "MODERATE" : "WEAK";
+  const strengthSub = marketStrength >= 65 ? "Trend has conviction." : marketStrength >= 40 ? "Mixed signals — monitor closely." : "Fading momentum.";
 
   const shortSqueeze = fundingRate !== null ? Math.round(Math.min(100, Math.max(0, -fundingRate * 400 + (smoothedBuyPct != null ? smoothedBuyPct - 50 : 0) * 1.5))) : 0;
   const longSqueeze = fundingRate !== null ? Math.round(Math.min(100, Math.max(0, fundingRate * 400 + (smoothedBuyPct != null ? 50 - smoothedBuyPct : 0) * 1.5))) : 0;
@@ -916,8 +906,8 @@ export default function LiquidityRadar() {
                 <XAxis dataKey="time" tickFormatter={(t) => new Date(t).toLocaleTimeString([], { hour: "2-digit", minute: "2-digit" })} stroke="#64748b" fontSize={10} minTickGap={30} tickLine={false} axisLine={false} dy={10} />
                 <YAxis domain={["auto", "auto"]} stroke="#64748b" fontSize={10} width={54} tickFormatter={(v) => fmtCompact(v)} tickLine={false} axisLine={false} />
                 <Tooltip content={<CustomTooltip />} cursor={{ stroke: '#334155', strokeWidth: 1, strokeDasharray: '4 4' }} />
-                <Bar dataKey="wick" stackId="ohlc" shape={<WickShape />} isAnimationActive={false} />
-                <Bar dataKey="candle" stackId="ohlc" shape={<CandleBodyShape />} isAnimationActive={false} />
+                <Bar dataKey="wick" shape={<WickShape />} isAnimationActive={false} />
+                <Bar dataKey="candle" shape={<CandleBodyShape />} isAnimationActive={false} />
               </ComposedChart>
             </ResponsiveContainer>
           </div>
